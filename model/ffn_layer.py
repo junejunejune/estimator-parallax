@@ -60,11 +60,6 @@ class FeedFowardNetwork(tf.layers.Layer):
     if padding is not None:
       with tf.name_scope("remove_padding"):
         # Flatten padding to [batch_size*length]
-        from tensorflow.python.framework import ops
-        if isinstance(x, ops.IndexedSlices):
-          print("remove_padding: sparse")
-        else:
-          print("remove_padding: dense")
 
         pad_mask = tf.reshape(padding, [-1])
 
@@ -72,7 +67,6 @@ class FeedFowardNetwork(tf.layers.Layer):
 
         # Reshape x to [batch_size*length, hidden_size] to remove padding
         x = tf.reshape(x, [-1, self.hidden_size])
-        print("before tf.gather_nd")
         x = tf.gather_nd(x, indices=nonpad_ids)
 
         # Reshape x from 2 dimensions to 3 dimensions.

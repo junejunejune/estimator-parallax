@@ -56,11 +56,6 @@ class EmbeddingSharedWeights(tf.layers.Layer):
           "weights", [self.vocab_size, self.hidden_size],
           initializer=tf.random_normal_initializer(
               0., self.hidden_size ** -0.5, dtype=dtypes.float32))
-      from tensorflow.python.framework import ops
-      if isinstance(self.shared_weights, ops.IndexedSlices):
-        print("build: sparse", self.shared_weights.name)
-      else:
-        print("build: dense", self.shared_weights.name)
 
     self.built = True
 
@@ -78,12 +73,7 @@ class EmbeddingSharedWeights(tf.layers.Layer):
       # Create binary mask of size [batch_size, length]
       mask = tf.to_float(tf.not_equal(x, 0))
   
-      from tensorflow.python.framework import ops
       if self.method == "gather":
-        if isinstance(self.shared_weights, ops.IndexedSlices):
-          print("gather: sparse")
-        else:
-          print("gather: dense")
         embeddings = tf.gather(self.shared_weights, x)
         embeddings *= tf.expand_dims(mask, -1)
       else:  # matmul

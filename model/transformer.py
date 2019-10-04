@@ -62,6 +62,17 @@ class Transformer(object):
     self.encoder_stack = EncoderStack(params, train)
     self.decoder_stack = DecoderStack(params, train)
 
+    '''
+    print("------------------------------------------------------------------------------------")
+    for i in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES):
+      from tensorflow.python.framework import ops
+      from tensorflow.python.framework import sparse_tensor
+      if isinstance(i, ops.IndexedSlices) or isinstance(i,sparse_tensor.SparseTensor):
+        print("model variable- sparse: ", i)
+      else:
+        print("model variable- dense: ", i)
+    '''
+
   def __call__(self, inputs, targets=None):
     """Calculate target logits or inferred target sequences.
 
