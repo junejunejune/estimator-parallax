@@ -118,7 +118,7 @@ def create_tower_network(model, params, features, labels):
   with tf.variable_scope('forward_and_backward', reuse=False):
     logits = model(features, labels)
     logits.set_shape(labels.shape.as_list() + logits.shape.as_list()[2:])
-    xentropy, weights = metrics.padded_cross_entropy_loss(logits, labels, params["label_smoothing"], int(params["vocab_size"]/2))
+    xentropy, weights = metrics.padded_cross_entropy_loss(logits, labels, params["label_smoothing"], params["vocab_size"])
     loss = tf.reduce_sum(xentropy)/tf.reduce_sum(weights)
     return logits, loss
 
@@ -176,33 +176,31 @@ def get_model_fn(train_input_fn, is_chief, batch_size, flags_obj):
       optimizers = [tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer) for optimizer in optimizers]
    
 #    feature_shards, label_shards = replicate_model_fn._split_batch(features, labels, num_gpus, device=consolidation_device)
-    feature_shards, label_shards = split_batch(features, labels, num_gpus)
+#    feature_shards, label_shards = split_batch(features, labels, num_gpus)
 
     model = transformer.Transformer(params, mode == tf.estimator.ModeKeys.TRAIN)
     grad_list= []
     losses = []
     logits = []
-    train_feature_batch = []
-    train_label_batch = []
     for gpu_idx in range(num_gpus):
       with tf.device(tf.DeviceSpec(device_type="GPU", device_index=gpu_idx)), tf.variable_scope('tower%d'%gpu_idx):
-        print("feature_shard size: ", feature_shards[gpu_idx].shape)
-        logit, loss = create_tower_network(model, params, feature_shards[gpu_idx], label_shards[gpu_idx])
+        logit, loss = create_tower_network(model, params, features, labels)
 #        feature_shard, label_shard = next(iterator)
 #        logit, loss = create_tower_network(model, params, features, labels)
         logits.append(logit)
         losses.append(loss)
         grad_list.append([x for x in optimizers[gpu_idx].compute_gradients(loss) if x[0] is not None])
 
-    output_train = tf.concat(logits, axis=0)
-#    output_train = logits
+#    output_train = tf.concat(logits, axis=0)
+    output_train = tf.reduce_mean(logits, axis=0)
+    loss_train = tf.reduce_mean(losses, name='loss')
+    
     grads = []
     all_vars= []
     for tower in grad_list:
       grads.append([x[0] for x in tower])
       all_vars.append([x[1] for x in tower])
     
-#reduced_grad = allreduce_grads(grads)
     reduced_grad = []
 #    from tensorflow.contrib import nccl
     from tensorflow.python.ops import nccl_ops
@@ -234,15 +232,11 @@ def get_model_fn(train_input_fn, is_chief, batch_size, flags_obj):
     optimize_op = tf.group(*train_ops, name='train_op')
     train_metrics = {"learning_rate": learning_rate}
 
-    loss_train = tf.reduce_mean(losses, name='loss')
     tf.identity(loss_train, "cross_entropy")
-    print("LOSSES: ", losses)
-    print("LOSS_TRAIN: ", loss_train)
 
     if mode == tf.estimator.ModeKeys.TRAIN:
       return tf.estimator.EstimatorSpec(mode=mode, loss=loss_train, train_op=optimize_op)
     if mode == tf.estimator.ModeKeys.EVAL:
-      labels = tf.concat(labels, axis=0)
       return tf.estimator.EstimatorSpec(mode=mode, loss=loss_train, predictions={"predictions": output_train}, eval_metric_ops=metrics.get_eval_metrics(output_train, labels, params))
     if mode == tf.estimator.ModeKeys.PREDICT:
       return tf.estimator.EstimatorSpec(tf.estimator.ModeKeys.PREDICT, predictions=output_train, export_outputs={"translate": tf.estimator.export.PredictOutput(output_train)})
