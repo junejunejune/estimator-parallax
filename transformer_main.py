@@ -183,7 +183,10 @@ def get_model_fn(train_input_fn, is_chief, batch_size, flags_obj):
     losses = []
     logits = []
     for gpu_idx in range(num_gpus):
-      with tf.device(tf.DeviceSpec(device_type="GPU", device_index=gpu_idx)), tf.variable_scope('tower%d'%gpu_idx):
+      device_setter = local_device_setter(ps_device_type='cpu', worker_device='/gpu:{}'.format(gpu_idx))
+      with tf.device(device_setter):
+#      with tf.device(tf.DeviceSpec(device_type="GPU", device_index=gpu_idx)), tf.variable_scope('tower%d'%gpu_idx):
+#with tf.device(tf.compat.v1.train.replica_device_setter(cluster=cluster_spec)):
         logit, loss = create_tower_network(model, params, features, labels)
 #        feature_shard, label_shard = next(iterator)
 #        logit, loss = create_tower_network(model, params, features, labels)
