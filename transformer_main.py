@@ -91,11 +91,13 @@ def local_device_setter(num_devices=1, ps_device_type='cpu', worker_device='/cpu
     raise TypeError("ps_strategy must be callable")
 
   def _local_device_chooser(op):
+
     current_device = pydev.DeviceSpec.from_string(op.device or "") 
 
     node_def = op if isinstance(op, node_def_pb2.NodeDef) else op.node_def
 
     #place sparse variable on parameter server
+
     if node_def.op in ps_ops and (isinstance(node_def.op, ops.IndexedSlices) or isinstance(node_def.op, sparse_tensor.SparseTensor)):
 #    if node_def.op in ps_ops:
       ps_device_spec = pydev.DeviceSpec.from_string(
@@ -110,91 +112,145 @@ def local_device_setter(num_devices=1, ps_device_type='cpu', worker_device='/cpu
       return worker_device_spec.to_string()
   return _local_device_chooser
 
-def get_model_fn(is_chief, batch_size, flags_obj):
+def create_tower_network(model, params, features, labels):
+  print("features print: ", features)
+  print("labels print: ", labels)
+  with tf.variable_scope('forward_and_backward', reuse=False):
+    logits = model(features, labels)
+    logits.set_shape(labels.shape.as_list() + logits.shape.as_list()[2:])
+    xentropy, weights = metrics.padded_cross_entropy_loss(logits, labels, params["label_smoothing"], int(params["vocab_size"]/2))
+    loss = tf.reduce_sum(xentropy)/tf.reduce_sum(weights)
+    return logits, loss
+
+from tensorflow.python.ops import array_ops
+def split_batch(features, labels, number_of_shards):
+  def ensure_divisible_by_shards(sequence):
+    batch_size = ops.convert_to_tensor(sequence).get_shape()[0]
+    if batch_size % number_of_shards != 0:
+      raise ValueError(
+          'Batch size {} needs to be divisible by the number of GPUs, which '
+          'is {}.'.format(batch_size, number_of_shards))
+
+  def split_dictionary(dictionary):
+    """Split a dictionary into shards."""
+    shards = [{} for _ in range(number_of_shards)]
+    for name, tensor in six.iteritems(dictionary):
+      if isinstance(tensor, sparse_tensor.SparseTensor):
+        for i, shard in enumerate(
+            sparse_ops.sparse_split(
+                sp_input=tensor, num_split=number_of_shards, axis=0)):
+          shards[i][name] = shard
+      else:
+        ensure_divisible_by_shards(tensor)
+        for i, shard in enumerate(array_ops.split(tensor, number_of_shards)):
+          shards[i][name] = shard
+    return shards
+
+  if isinstance(features, dict):
+    feature_shards = split_dictionary(features)
+  else:
+    ensure_divisible_by_shards(features)
+    feature_shards = array_ops.split(features, number_of_shards)
+
+  if labels is None:
+    label_shards = None
+  elif isinstance(labels, dict):
+    label_shards = split_dictionary(labels)
+  else:
+    ensure_divisible_by_shards(labels)
+    label_shards = array_ops.split(labels, number_of_shards)
+  return feature_shards, label_shards
+
+
+def get_model_fn(train_input_fn, is_chief, batch_size, flags_obj):
+ 
   def model_fn(features, labels, mode, params):
     """Defines how to train, evaluate and predict from the transformer model."""  
-    num_devices=flags_core.get_num_gpus(flags_obj)
-    consolidation_device = 'gpu:0'
-    feature_shards, label_shards = replicate_model_fn._split_batch(features, labels, num_devices, device=consolidation_device)
-    '''
-    num_shards = num_devices
-    feature_shards = [[] for i in range(num_devices)]
-    label_shards = [[] for i in range(num_devices)]
-    for i in xrange(batch_size):
-      idx = i % num_shards
-      feature_shards[idx].append(features[i])
-      label_shards[idx].append(labels[i])
-    feature_shards = [tf.parallel_stack(x) for x in feature_shards]
-    label_shards = [tf.parallel_stack(x) for x in label_shards]
-    '''
 
-    tower_losses = []
-    tower_gradvars = []
-    tower_preds = []
-    for i in range(num_devices):
-      worker_device = '/{}:{}'.format('gpu', i)
-      device_setter = local_device_setter(ps_device_type='gpu', worker_device=worker_device, ps_strategy=tf.contrib.training.GreedyLoadBalancingStrategy(num_devices, tf.contrib.training.byte_size_load_fn))
-      with tf.variable_scope('model', reuse=bool(i != 0)):
-        with tf.name_scope('tower_%d' % i) as name_scope:
-          with tf.device(device_setter):
-            # Create model and get output logits.
-            model = transformer.Transformer(params, mode == tf.estimator.ModeKeys.TRAIN)
-            #logits = model(features, labels)
-            loss, gradvars, preds = _tower_fn(model, feature_shards[i], label_shards[i], params=params)
-            tower_losses.append(loss)
-            tower_gradvars.append(gradvars)
-            tower_preds.append(preds)
+    num_gpus=flags_core.get_num_gpus(flags_obj)
+    
+    learning_rate = get_learning_rate(learning_rate=params["learning_rate"], hidden_size=params["hidden_size"], learning_rate_warmup_steps=params["learning_rate_warmup_steps"])
+    optimizers = [tf.contrib.opt.LazyAdamOptimizer(learning_rate, beta1=params["optimizer_adam_beta1"], beta2=params["optimizer_adam_beta2"], epsilon=params["optimizer_adam_epsilon"]) for _ in range(num_gpus)]
 
-    # Compute global loss and gradients
-    gradvars = []
-    with tf.name_scope('gradient_averaging'):
-      all_grads = {}
-      for grad, var in itertools.chain(*tower_gradvars):
-        if grad is not None:
-          all_grads.setdefault(var, []).append(grad)
-      for var, grads in six.iteritems(all_grads):
-        with tf.device(var.device):
-          if len(grads) == 1:
-            avg_grad = grads[0]
-          else:
-#            for a in range(len(grads)):
-#              if len(grads[a]) > 1:
-#                avg_grad = tf.multiply(tf.add_n(grads[a]), 1. / len(grads[a]))
-#                gradvars.append((avg_grad, var))
-            avg_grad = tf.multiply(tf.add_n(grads), 1. / len(grads))
-#          print("AVG_GRAD: ", avg_grad, "VAR: ", var) 
-          gradvars.append((avg_grad, var))
+    if params["dtype"] == "fp16":
+      optimizers = [tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer) for optimizer in optimizers]
+   
+#    feature_shards, label_shards = replicate_model_fn._split_batch(features, labels, num_gpus, device=consolidation_device)
+    feature_shards, label_shards = split_batch(features, labels, num_gpus)
 
-    with tf.device(consolidation_device):
-      loss = tf.reduce_mean(tower_losses, name='loss')
-      tf.identity(loss, "cross_entropy")
-      logits = tf.concat([l for l in tower_preds], axis=0)
-      if mode == tf.estimator.ModeKeys.PREDICT:
-        return tf.estimator.EstimatorSpec(tf.estimator.ModeKeys.PREDICT, predictions=logits, export_outputs={"translate": tf.estimator.export.PredictOutput(logits)})
+    model = transformer.Transformer(params, mode == tf.estimator.ModeKeys.TRAIN)
+    grad_list= []
+    losses = []
+    logits = []
+    train_feature_batch = []
+    train_label_batch = []
+    for gpu_idx in range(num_gpus):
+      with tf.device(tf.DeviceSpec(device_type="GPU", device_index=gpu_idx)), tf.variable_scope('tower%d'%gpu_idx):
+        print("feature_shard size: ", feature_shards[gpu_idx].shape)
+        logit, loss = create_tower_network(model, params, feature_shards[gpu_idx], label_shards[gpu_idx])
+#        feature_shard, label_shard = next(iterator)
+#        logit, loss = create_tower_network(model, params, features, labels)
+        logits.append(logit)
+        losses.append(loss)
+        grad_list.append([x for x in optimizers[gpu_idx].compute_gradients(loss) if x[0] is not None])
 
-      if mode == tf.estimator.ModeKeys.TRAIN:
-        with tf.variable_scope("get_train_op"):
-          print("in get_train_op")
-          learning_rate = get_learning_rate(learning_rate=params["learning_rate"], hidden_size=params["hidden_size"], learning_rate_warmup_steps=params["learning_rate_warmup_steps"])
-          optimizer = tf.contrib.opt.LazyAdamOptimizer(learning_rate, beta1=params["optimizer_adam_beta1"], beta2=params["optimizer_adam_beta2"], epsilon=params["optimizer_adam_epsilon"])
-          optimizer = tf.train.SyncReplicasOptimizer(optimizer, replicas_to_aggregate=num_devices)
-          sync_hook = optimizer.make_session_run_hook(is_chief)
-#          update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+    output_train = tf.concat(logits, axis=0)
+#    output_train = logits
+    grads = []
+    all_vars= []
+    for tower in grad_list:
+      grads.append([x[0] for x in tower])
+      all_vars.append([x[1] for x in tower])
+    
+#reduced_grad = allreduce_grads(grads)
+    reduced_grad = []
+#    from tensorflow.contrib import nccl
+    from tensorflow.python.ops import nccl_ops
+    if num_gpus==1:
+      reduced_grad = grads
+    else:
+      new_all_grads = []
+      for grad in zip(*grads):
+#        summed = nccl.all_sum(grad)
+        summed = nccl_ops.all_sum(grad)
+        grads_for_devices = []
+        for g in summed:
+          with tf.device(g.device):
+            g = tf.multiply(g, 1.0 / num_gpus, name='allreduce_avg')
+          grads_for_devices.append(g)
+        new_all_grads.append(grads_for_devices)
+      reduced_grad = list(zip(*new_all_grads))
+    
+#    grads = merge_grad_list(reduced_grad, all_vars)
+    grads = [list(zip(gs, vs)) for gs, vs in zip(reduced_grad, all_vars)]
 
-          global_step = tf.train.get_global_step()
-          update_ops = tf.assign(global_step, global_step + 1, name='update_global_step')
-          minimize_op = optimizer.apply_gradients(gradvars, global_step=tf.train.get_global_step())
-          train_op = tf.group(minimize_op, update_ops)
-          #train_op = [optimizer.apply_gradients(gradvars, global_step=tf.train.get_global_step())]
-          metric_dict = {"learning_rate": learning_rate}
-          metric_dict["minibatch_loss"] = loss
-          record_scalars(metric_dict)
-          return tf.estimator.EstimatorSpec(mode=mode, loss=loss, training_hooks=[sync_hook], train_op=train_op)
-      elif mode == tf.estimator.ModeKeys.EVAL:
-        return tf.estimator.EstimatorSpec(mode=mode, loss=loss, predictions={"predictions": logits}, eval_metric_ops=metrics.get_eval_metrics(logits, labels,params))      
+    #apply gradients to each GPU by broadcasting summed gradient
+    train_ops = []
+    for idx, grad_and_vars in enumerate(grads):
+      with tf.name_scope('apply_gradients'), tf.device(tf.DeviceSpec(device_type="GPU", device_index=idx)):
+        update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='tower%d'%idx)
+        with tf.control_dependencies(update_ops):
+          train_ops.append(optimizers[idx].apply_gradients(grad_and_vars, name='apply_grad_{}'.format(idx)))
+    optimize_op = tf.group(*train_ops, name='train_op')
+    train_metrics = {"learning_rate": learning_rate}
+
+    loss_train = tf.reduce_mean(losses, name='loss')
+    tf.identity(loss_train, "cross_entropy")
+    print("LOSSES: ", losses)
+    print("LOSS_TRAIN: ", loss_train)
+
+    if mode == tf.estimator.ModeKeys.TRAIN:
+      return tf.estimator.EstimatorSpec(mode=mode, loss=loss_train, train_op=optimize_op)
+    if mode == tf.estimator.ModeKeys.EVAL:
+      labels = tf.concat(labels, axis=0)
+      return tf.estimator.EstimatorSpec(mode=mode, loss=loss_train, predictions={"predictions": output_train}, eval_metric_ops=metrics.get_eval_metrics(output_train, labels, params))
+    if mode == tf.estimator.ModeKeys.PREDICT:
+      return tf.estimator.EstimatorSpec(tf.estimator.ModeKeys.PREDICT, predictions=output_train, export_outputs={"translate": tf.estimator.export.PredictOutput(output_train)})
+
   return model_fn
 
-def _tower_fn(model, features, labels, params):
+def _tower_fn(i, model, features, labels, params):
+
   logits = model(features, labels)
 
   xentropy, weights = metrics.padded_cross_entropy_loss(logits, labels, params["label_smoothing"], params["vocab_size"])
@@ -204,9 +260,9 @@ def _tower_fn(model, features, labels, params):
     optimizer = tf.contrib.opt.LazyAdamOptimizer(learning_rate, beta1=params["optimizer_adam_beta1"], beta2=params["optimizer_adam_beta2"], epsilon=params["optimizer_adam_epsilon"])
     model_params = tf.trainable_variables()
 #    tower_grad = optimizer.compute_gradients(tower_loss, model_params, colocate_gradients_with_ops=True)
-    
-    tower_grad = tf.gradients(tower_loss, model_params)
-    return tower_loss, zip(tower_grad, model_params), logits
+    with tf.variable_scope("is_gradient"): 
+      tower_grad = tf.gradients(tower_loss, model_params)
+      return tower_loss, zip(tower_grad, model_params), logits
 
 def record_scalars(metric_dict):
   for key, value in metric_dict.items():
@@ -520,8 +576,9 @@ def get_experiment_fn(is_chief, flags_obj, params, schedule_manager, num_gpus, v
     eval_input_fn = dataset.eval_input_fn
     train_steps = flags_obj.train_steps
     eval_steps = flags_obj.steps_between_evals
+
 #    estimator = construct_estimator(flags_obj, params, schedule_manager)
-    estimator = tf.estimator.Estimator(model_fn=get_model_fn(is_chief,schedule_manager.batch_size, flags_obj), model_dir=flags_obj.model_dir, params=params, config=run_config)
+    estimator = tf.estimator.Estimator(model_fn=get_model_fn(train_input_fn, is_chief,params["batch_size"], flags_obj), model_dir=flags_obj.model_dir, params=params, config=run_config)
     return tf.contrib.learn.Experiment(
         estimator, train_input_fn=dataset.train_input_fn, eval_input_fn=dataset.eval_input_fn, train_steps=train_steps, eval_steps=eval_steps)
   return _experiment_fn 
@@ -558,6 +615,7 @@ def run_transformer(flags_obj):
     flags_obj: Object containing parsed flag values.
   """
   num_gpus = flags_core.get_num_gpus(flags_obj)
+  print("NUM_GPUS: ", num_gpus)
 
   # Add flag-defined parameters to params object
   params = PARAMS_MAP[flags_obj.param_set]
@@ -566,7 +624,8 @@ def run_transformer(flags_obj):
       params = model_params.BIG_MULTI_GPU_PARAMS
     elif flags_obj.param_set == "base":
       params = model_params.BASE_MULTI_GPU_PARAMS
-
+  
+  params["num_gpus"] = num_gpus
   params["data_dir"] = flags_obj.data_dir
   params["model_dir"] = flags_obj.model_dir
   params["num_parallel_calls"] = flags_obj.num_parallel_calls
@@ -580,9 +639,9 @@ def run_transformer(flags_obj):
   # Set batch size parameter, which depends on the availability of
   # TPU and GPU, and distribution settings.
   params["batch_size"] = (flags_obj.batch_size or params["default_batch_size"])
-
-  params["batch_size"] = distribution_utils.per_device_batch_size(
-      params["batch_size"], num_gpus)
+  print("BATCH_SIZE1: ",params["batch_size"])
+#  params["batch_size"] = distribution_utils.per_device_batch_size(params["batch_size"], num_gpus)
+#  print("BATCH_SIZE2: ", params["batch_size"])
 
   schedule_manager = schedule.Manager(
       train_steps=flags_obj.train_steps,
@@ -626,7 +685,8 @@ def run_transformer(flags_obj):
       log_device_placement=False,
       intra_op_parallelism_threads=0,
       gpu_options=tf.GPUOptions(force_gpu_compatible=True))
-
+  sess_config.gpu_options.allocator_type = 'BFC'
+  sess_config.gpu_options.per_process_gpu_memory_fraction = 0.90
   print("SESS_CONFIG: ", sess_config)
   config = RunConfig(session_config=sess_config, model_dir=params["model_dir"])
   variable_strategy = 'GPU'
@@ -672,6 +732,8 @@ def main(_):
 
 
 if __name__ == "__main__":
+  
+  tf.enable_eager_execution()
   tf.logging.set_verbosity(tf.logging.INFO)
   define_transformer_flags()
   absl_app.run(main)
