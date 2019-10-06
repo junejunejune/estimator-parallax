@@ -95,13 +95,9 @@ class _ReplicaDeviceChooser(object):
   def device_function(self, op):
     if not self._merge_devices and op.device:
       return op.device
-    '''
-    from tensorflow.python.client import device_lib
-    def get_available_gpus():
-      local_device_protos = device_lib.list_local_devices()
-      return [x.name for x in local_device_protos if x.device_type == 'GPU']
-    '''
+
     current_device = pydev.DeviceSpec.from_string(op.device or "")
+
     node_def = op if isinstance(op, node_def_pb2.NodeDef) else op.node_def
     if self._ps_tasks and self._ps_device and node_def.op in self._ps_ops:
       ps_device = pydev.DeviceSpec.from_string(self._ps_device)
@@ -111,27 +107,24 @@ class _ReplicaDeviceChooser(object):
         ps_device.task = self._ps_strategy(op)
 
       ps_device.merge_from(current_device)
-      print("PS DEVICE: ", ps_device.to_string())
       return ps_device.to_string()
 
     worker_device = pydev.DeviceSpec.from_string(self._worker_device or "")
     worker_device.merge_from(current_device)
-    print("WORKER DEVICE: ", worker_device.to_string())
     return worker_device.to_string()
 
-def local_device_setter(cluster, worker_device='/cpu:0'):
-  ps_ops = ['Variable', 'VariableV2', 'VarHandleOp', 'AutoReloadVariable']
+def local_device_setter(cluster, num_devices, worker_device='/cpu:0', ps_ops=None, ps_strategy=None):
+  if ps_ops == None:
+    ps_ops = ['Variable', 'VariableV2', 'VarHandleOp']
 
   cluster_spec = cluster.as_dict()
-  ps_device="/job:ps"
+  ps_device="/job:ps/cpu:0"
   ps_job_name = pydev.DeviceSpec.from_string(ps_device).job
   ps_tasks = len(cluster_spec[ps_job_name])
   ps_strategy = device_setter._RoundRobinStrategy(ps_tasks)
   merge_devices=True  
   print("LOCAL DEVICE SETTER: ")
-  print("ps_job_name: ", ps_job_name)
-  print("ps_strategy: ", ps_strategy)
-  print("ps_device: ", ps_device, "ps_tasks num:", ps_tasks)
+  print("ps_device: ", ps_device)
   print("worker_device: ", worker_device)
   chooser = _ReplicaDeviceChooser(ps_tasks, ps_device, worker_device, merge_devices, ps_ops, ps_strategy)
   return chooser.device_function
@@ -184,7 +177,7 @@ def get_model_fn(cluster, task_index, train_input_fn, batch_size, flags_obj):
     losses = []
     logits = []
     for gpu_idx in range(num_gpus):
-      device_setter = local_device_setter(cluster, worker_device="/job:worker/task:%d" % gpu_idx)
+      device_setter = local_device_setter(cluster, num_gpus, worker_device='/job:worker/task:{}/gpu:0'.format(gpu_idx))
       with tf.device(device_setter):
 #      with tf.device(tf.DeviceSpec(device_type="GPU", device_index=gpu_idx)), tf.variable_scope('tower%d'%gpu_idx):
 #with tf.device(tf.compat.v1.train.replica_device_setter(cluster=cluster_spec)):

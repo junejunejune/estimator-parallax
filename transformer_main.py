@@ -99,10 +99,12 @@ def local_device_setter(num_devices=1, ps_device_type='cpu', worker_device='/cpu
           '/{}:{}'.format(ps_device_type, ps_strategy(op)))
 
       ps_device_spec.merge_from(current_device)
+      print("PS DEVICE STRING: ", ps_device_spec.to_string())
       return ps_device_spec.to_string()
     else:
       worker_device_spec = pydev.DeviceSpec.from_string(worker_device or "") 
       worker_device_spec.merge_from(current_device)
+      print("WORKER DEVICE STRING: ", worker_device_spec.to_string())
       return worker_device_spec.to_string()
   return _local_device_chooser
 
