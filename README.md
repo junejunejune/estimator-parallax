@@ -16,10 +16,11 @@ python data_download.py --data_dir=$DATA_DIR
 
 # 실행 커멘드 
 (model_dir는 체크 포인트를 불러오는 곳으로, 트레이닝 할때는 아무 곳이나 지정하면 됩니다.)
-'''
+
+```
 python transformer_main.py --data_dir=$DATA_DIR --model_dir=$HOME/transformer/save \
    --vocab_file=$VOCAB_FILE --param_set=$PARAM_SET  --batch_size=2046 --num_gpus=6
-'''
+```
 ----------------------------------------------------------------------------------------------------------------------------
 # Transformer Translation Model
 This is an implementation of the Transformer translation model as described in the [Attention is All You Need](https://arxiv.org/abs/1706.03762) paper. Based on the code provided by the authors: [Transformer code](https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/models/transformer.py) from [Tensor2Tensor](https://github.com/tensorflow/tensor2tensor).
