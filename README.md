@@ -2,11 +2,12 @@
 
 
 # Export variables
+```
 PARAM_SET=big
 DATA_DIR=$HOME/transformer/data
 MODEL_DIR=$HOME/transformer/model_$PARAM_SET
 VOCAB_FILE=$DATA_DIR/vocab.ende.32768
-
+```
 # 데이터 다운로드
 ```
 python data_download.py --data_dir=$DATA_DIR
