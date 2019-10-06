@@ -75,12 +75,10 @@ from tensorflow.core.framework import node_def_pb2
 from tensorflow.python.training import device_setter
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
-
 from tensorflow_estimator.contrib.estimator.python.estimator import replicate_model_fn
 from tensorflow.python.ops.losses import losses
 from tensorflow.python.training import training
 from tensorflow.python.training import device_setter as device_setter_lib
-
 
 class _ReplicaDeviceChooser(object):
   def __init__(self, ps_tasks, ps_device, worker_device, merge_devices, ps_ops,
@@ -103,6 +101,8 @@ class _ReplicaDeviceChooser(object):
     '''
     current_device = pydev.DeviceSpec.from_string(op.device or "")
     node_def = op if isinstance(op, node_def_pb2.NodeDef) else op.node_def
+
+#    if node_def.op in ps_ops and (isinstance(node_def.op, ops.IndexedSlices) or isinstance(node_def.op, sparse_tensor.SparseTensor)):
     if self._ps_tasks and self._ps_device and node_def.op in self._ps_ops:
       ps_device = pydev.DeviceSpec.from_string(self._ps_device)
 
@@ -111,19 +111,21 @@ class _ReplicaDeviceChooser(object):
         ps_device.task = self._ps_strategy(op)
 
       ps_device.merge_from(current_device)
-      print("PS DEVICE: ", ps_device.to_string())
-      return ps_device.to_string()
-
+#      print("PS DEVICE: ", ps_device.to_string())
+#      return ps_device.to_string()
+      return '/job:localhost/replica:0/task:0/device:CPU:0'
     worker_device = pydev.DeviceSpec.from_string(self._worker_device or "")
     worker_device.merge_from(current_device)
-    print("WORKER DEVICE: ", worker_device.to_string())
-    return worker_device.to_string()
+#    print("WORKER DEVICE: ", worker_device.to_string())
+    return '/job:localhost/replica:0/task:0/device:{}'.format(self._worker_device)
+#    return '/job:localhost/replica:0/task:0/device:GPU:0'
+#    return worker_device.to_string()+'/device:GPU:0'
 
 def local_device_setter(cluster, worker_device='/cpu:0'):
   ps_ops = ['Variable', 'VariableV2', 'VarHandleOp', 'AutoReloadVariable']
 
   cluster_spec = cluster.as_dict()
-  ps_device="/job:ps"
+  ps_device="/job:ps/task:0/cpu:0"
   ps_job_name = pydev.DeviceSpec.from_string(ps_device).job
   ps_tasks = len(cluster_spec[ps_job_name])
   ps_strategy = device_setter._RoundRobinStrategy(ps_tasks)
@@ -135,25 +137,6 @@ def local_device_setter(cluster, worker_device='/cpu:0'):
   print("worker_device: ", worker_device)
   chooser = _ReplicaDeviceChooser(ps_tasks, ps_device, worker_device, merge_devices, ps_ops, ps_strategy)
   return chooser.device_function
-	
-  '''
-	def _local_device_chooser(op):
-    current_device = pydev.DeviceSpec.from_string(op.device or "") 
-    node_def = op if isinstance(op, node_def_pb2.NodeDef) else op.node_def
-
-    if node_def.op in ps_ops and (isinstance(node_def.op, ops.IndexedSlices) or isinstance(node_def.op, sparse_tensor.SparseTensor)):
-#    if node_def.op in ps_ops:
-      ps_device_spec = pydev.DeviceSpec.from_string(
-          '/{}:{}'.format(ps_device_type, ps_strategy(op)))
-
-      ps_device_spec.merge_from(current_device)
-      return ps_device_spec.to_string()
-    else:
-      worker_device_spec = pydev.DeviceSpec.from_string(worker_device or "") 
-      worker_device_spec.merge_from(current_device)
-      return worker_device_spec.to_string()
-  return _local_device_chooser
-	'''
 
 def create_tower_network(model, params, features, labels):
   print("features print: ", features)
@@ -165,9 +148,7 @@ def create_tower_network(model, params, features, labels):
     loss = tf.reduce_sum(xentropy)/tf.reduce_sum(weights)
     return logits, loss
 
-
 def get_model_fn(cluster, task_index, train_input_fn, batch_size, flags_obj):
- 
   def model_fn(features, labels, mode, params):
     """Defines how to train, evaluate and predict from the transformer model."""  
     cluster_spec = cluster.as_dict()
@@ -184,8 +165,10 @@ def get_model_fn(cluster, task_index, train_input_fn, batch_size, flags_obj):
     losses = []
     logits = []
     for gpu_idx in range(num_gpus):
-      device_setter = local_device_setter(cluster, worker_device="/job:worker/task:%d" % gpu_idx)
+#      device_setter = local_device_setter(cluster, worker_device="/job:worker/task:%d" % gpu_idx)
+      device_setter = local_device_setter(cluster, worker_device="gpu:%d" % gpu_idx)
       with tf.device(device_setter):
+#      with tf.device(tf.train.replica_device_setter(worker_device="/job:worker/task:%d" % gpu_idx, cluster=cluster)):
 #      with tf.device(tf.DeviceSpec(device_type="GPU", device_index=gpu_idx)), tf.variable_scope('tower%d'%gpu_idx):
 #with tf.device(tf.compat.v1.train.replica_device_setter(cluster=cluster_spec)):
         logit, loss = create_tower_network(model, params, features, labels)
@@ -243,9 +226,7 @@ def get_model_fn(cluster, task_index, train_input_fn, batch_size, flags_obj):
       return tf.estimator.EstimatorSpec(mode=mode, loss=loss_train, predictions={"predictions": output_train}, eval_metric_ops=metrics.get_eval_metrics(output_train, labels, params))
     if mode == tf.estimator.ModeKeys.PREDICT:
       return tf.estimator.EstimatorSpec(mode=mode, predictions=output_train, export_outputs={"translate": tf.estimator.export.PredictOutput(output_train)})
-
   return model_fn
-
 
 def get_learning_rate(learning_rate, hidden_size, learning_rate_warmup_steps):
   print("def get_learning_rate")
@@ -403,31 +384,9 @@ def get_experiment_fn(cluster, flags_obj, params, num_gpus, variable_strategy):
     return tf.contrib.learn.Experiment(
         estimator, train_input_fn=dataset.train_input_fn, eval_input_fn=dataset.eval_input_fn, train_steps=train_steps, eval_steps=eval_steps)
   return _experiment_fn 
-'''
-class RunConfig(tf.contrib.learn.RunConfig):
-  def uid(self, whitelist=None):
-    if whitelist is None:
-      whitelist = run_config._DEFAULT_UID_WHITE_LIST
 
-    state = {k: v for k, v in self.__dict__.items() if not k.startswith('__')}
-    # Pop out the keys in whitelist.
-    for k in whitelist:
-      state.pop('_' + k, None)
 
-    ordered_state = collections.OrderedDict(
-        sorted(state.items(), key=lambda t: t[0]))
-    # For class instance without __repr__, some special cares are required.
-    # Otherwise, the object address will be used.
-    if '_cluster_spec' in ordered_state:
-      ordered_state['_cluster_spec'] = collections.OrderedDict(
-         sorted(ordered_state['_cluster_spec'].as_dict().items(),
-                key=lambda t: t[0])
-      )   
 
-    print("IN RUNCONFIG")
-    print(', '.join('%s=%r' % (k, v) for (k, v) in six.iteritems(ordered_state))) 
-    return ', '.join('%s=%r' % (k, v) for (k, v) in six.iteritems(ordered_state)) 
-'''
 def run_transformer(flags_obj):
   print("run_transformer: ")
   """Create tf.Estimator to train and evaluate transformer model.
@@ -468,10 +427,15 @@ def run_transformer(flags_obj):
   print("ps_hosts: ", ps_hosts)
   print("worker_hosts: ", worker_hosts)
   cluster = tf.train.ClusterSpec({"ps": ps_hosts, "worker": worker_hosts})
-  server = tf.train.Server(cluster, job_name=flags_obj.job_name, task_index=flags_obj.task_index)
+  print("CLUSTER: ", cluster)
+#  server = tf.train.Server(cluster, job_name=flags_obj.job_name, task_index=flags_obj.task_index)
+  server = tf.distribute.Server(cluster, job_name=flags_obj.job_name, task_index=flags_obj.task_index)
+  
   if flags_obj.job_name == "ps":
+    print("STARTING PS")
     server.join()
-  elif flags_obj.job_name == "worker":
+  else:
+    print("STARTING WORKER")
     print("\n\nBATCH_SIZE1: ",params["batch_size"])
 #  params["batch_size"] = distribution_utils.per_device_batch_size(params["batch_size"], num_gpus)
 #  params["repeat_dataset"] = schedule_manager.repeat_dataset
@@ -484,20 +448,18 @@ def run_transformer(flags_obj):
         allow_soft_placement=True,
         log_device_placement=False,
         intra_op_parallelism_threads=0,
-        gpu_options=tf.GPUOptions(force_gpu_compatible=True))
-    sess_config.gpu_options.allocator_type = 'BFC'
-    sess_config.gpu_options.per_process_gpu_memory_fraction = 0.90
+        gpu_options=tf.GPUOptions(force_gpu_compatible=True, per_process_gpu_memory_fraction=0.333))
+#    sess_config.gpu_options.allocator_type = 'BFC'
+#    sess_config.gpu_options.per_process_gpu_memory_fraction = 0.90
+    
     print("SESS_CONFIG: ", sess_config)
     config = tf.contrib.learn.RunConfig(session_config=sess_config, model_dir=params["model_dir"])
     variable_strategy = 'GPU'
 
 #  experiment_fn = get_experiment_fn(config.is_chief, flags_obj, params, schedule_manager, num_gpus, variable_strategy, use_distortion_for_training)
     experiment_fn = get_experiment_fn(cluster, flags_obj, params, len(worker_hosts), variable_strategy)
-    
 #tf.contrib.learn.learn_runner.run(experiment_fn, run_config=config, hparams=tf.contrib.training.HParams(is_chief=config.is_chief, **hparams))
-   
-    tf.contrib.learn.learn_runner.run(experiment_fn, run_config=config, hparams=tf.contrib.training.HParams(is_chief=flags_obj.task_index==0, **params))
-    
+    tf.contrib.learn.learn_runner.run(experiment_fn, run_config=config, hparams=tf.contrib.training.HParams(is_chief=flags_obj.task_index==0, **params))    
 
 def main(_):
   with logger.benchmark_context(flags.FLAGS):
