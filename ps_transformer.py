@@ -276,6 +276,18 @@ def define_transformer_flags():
   # only shown in the full `--helpful` help text.
   flags.adopt_module_key_flags(flags_core)
 
+  flags.DEFINE_string(
+      name="job_name", default=None, help=flags_core.help_wrap("blah"))
+
+  flags.DEFINE_integer(
+      name="task_index", default=None, help=flags_core.help_wrap("blah"))
+
+  flags.DEFINE_string(
+      name="ps_hosts", default=None, help=flags_core.help_wrap("blah"))
+
+  flags.DEFINE_string(
+      name="worker_hosts", default=None, help=flags_core.help_wrap("blah"))
+
   # Add transformer-specific flags
   flags.DEFINE_enum(
       name="param_set", short_name="mp", default="big",
@@ -407,7 +419,7 @@ class RunConfig(tf.contrib.learn.RunConfig):
     return ', '.join('%s=%r' % (k, v) for (k, v) in six.iteritems(ordered_state)) 
 
 def run_transformer(flags_obj):
-  print("run_transformer")
+  print("run_transformer: ")
   """Create tf.Estimator to train and evaluate transformer model.
 
   Args:
@@ -438,50 +450,48 @@ def run_transformer(flags_obj):
   # Set batch size parameter, which depends on the availability of
   # TPU and GPU, and distribution settings.
   params["batch_size"] = (flags_obj.batch_size or params["default_batch_size"])
-  print("BATCH_SIZE1: ",params["batch_size"])
+
+  print("\n\njob_name: ", flags_obj.job_name)
+  print("task_index: ", flags_obj.task_index)  
+  ps_hosts = flags_obj.ps_hosts.split(",")
+  worker_hosts = flags_obj.worker_hosts.split(",")
+  print("ps_hosts: ", ps_hosts)
+  print("worker_hosts: ", worker_hosts)
+  cluster = tf.train.ClusterSpec({"ps": ps_hosts, "worker": worker_hosts})
+  server = tf.train.Server(cluster, job_name=flags_obj.job_name, task_index=flags_obj.task_index)
+
+  if flags_obj.job_name == "ps":
+    server.join()
+  elif flags_obj.job_name == "worker":
+    print("\n\nBATCH_SIZE1: ",params["batch_size"])
 #  params["batch_size"] = distribution_utils.per_device_batch_size(params["batch_size"], num_gpus)
 
 #  params["repeat_dataset"] = schedule_manager.repeat_dataset
 
-  model_helpers.apply_clean(flags.FLAGS)
+    model_helpers.apply_clean(flags.FLAGS)
 
-  # Train and evaluate transformer model
+    # Train and evaluate transformer model
 
-  os.environ['TF_SYNC_ON_FINISH'] = '0'
-  os.environ['TF_ENABLE_WINOGRAD_NONFUSED'] = '1'
+    os.environ['TF_SYNC_ON_FINISH'] = '0'
+    os.environ['TF_ENABLE_WINOGRAD_NONFUSED'] = '1'
 
-  sess_config = tf.ConfigProto(
-      allow_soft_placement=True,
-      log_device_placement=False,
-      intra_op_parallelism_threads=0,
-      gpu_options=tf.GPUOptions(force_gpu_compatible=True))
-  sess_config.gpu_options.allocator_type = 'BFC'
-  sess_config.gpu_options.per_process_gpu_memory_fraction = 0.90
-  print("SESS_CONFIG: ", sess_config)
-  config = RunConfig(session_config=sess_config, model_dir=params["model_dir"])
-  variable_strategy = 'GPU'
+    sess_config = tf.ConfigProto(
+        allow_soft_placement=True,
+        log_device_placement=False,
+        intra_op_parallelism_threads=0,
+        gpu_options=tf.GPUOptions(force_gpu_compatible=True))
+    sess_config.gpu_options.allocator_type = 'BFC'
+    sess_config.gpu_options.per_process_gpu_memory_fraction = 0.90
+    print("SESS_CONFIG: ", sess_config)
+    config = RunConfig(session_config=sess_config, model_dir=params["model_dir"])
+    variable_strategy = 'GPU'
 #  experiment_fn = get_experiment_fn(config.is_chief, flags_obj, params, schedule_manager, num_gpus, variable_strategy, use_distortion_for_training)
-  experiment_fn = get_experiment_fn(flags_obj, params, num_gpus, variable_strategy)
-	
+    experiment_fn = get_experiment_fn(flags_obj, params, num_gpus, variable_strategy)
+    
 #tf.contrib.learn.learn_runner.run(experiment_fn, run_config=config, hparams=tf.contrib.training.HParams(is_chief=config.is_chief, **hparams))
- 
-  tf.contrib.learn.learn_runner.run(experiment_fn, run_config=config, hparams=tf.contrib.training.HParams(is_chief=config.is_chief, **params))
-  
-  '''
-  if flags_obj.export_dir:
-    serving_input_fn = export.build_tensor_serving_input_receiver_fn(
-        shape=[None], dtype=tf.int64, batch_size=None)
-    # Export saved model, and save the vocab file as an extra asset. The vocab
-    # file is saved to allow consistent input encoding and output decoding.
-    # (See the "Export trained model" section in the README for an example of
-    # how to use the vocab file.)
-    # Since the model itself does not use the vocab file, this file is saved as
-    # an extra asset rather than a core asset.
-    estimator.export_savedmodel(
-        flags_obj.export_dir, serving_input_fn,
-        assets_extra={"vocab.txt": flags_obj.vocab_file},
-        strip_default_attrs=True)
-  '''
+   
+    tf.contrib.learn.learn_runner.run(experiment_fn, run_config=config, hparams=tf.contrib.training.HParams(is_chief=config.is_chief, **params))
+    
 
 def main(_):
   with logger.benchmark_context(flags.FLAGS):
