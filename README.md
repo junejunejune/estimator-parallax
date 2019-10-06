@@ -16,8 +16,8 @@ python data_download.py --data_dir=$DATA_DIR
 
 # 실행 커멘드 
 (model_dir는 체크 포인트를 불러오는 곳으로, 트레이닝 할때는 아무 곳이나 지정하면 됩니다.)
-elsa-11: 147.46.15.23
-elsa-12: 147.46.15.21
+- elsa-11: 147.46.15.23
+- elsa-12: 147.46.15.21
 ps
 ```
 python ps_transformer.py --data_dir=$DATA_DIR --model_dir=$HOME/transformer/save \
