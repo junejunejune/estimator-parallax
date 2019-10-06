@@ -163,7 +163,9 @@ def get_model_fn(train_input_fn, batch_size, flags_obj):
   def model_fn(features, labels, mode, params):
     """Defines how to train, evaluate and predict from the transformer model."""  
     num_gpus=flags_core.get_num_gpus(flags_obj)
-    
+    print("num_gpus: ", num_gpus)
+#    num_gpus=params["num_gpus"]
+
     learning_rate = get_learning_rate(learning_rate=params["learning_rate"], hidden_size=params["hidden_size"], learning_rate_warmup_steps=params["learning_rate_warmup_steps"])
     optimizers = [tf.contrib.opt.LazyAdamOptimizer(learning_rate, beta1=params["optimizer_adam_beta1"], beta2=params["optimizer_adam_beta2"], epsilon=params["optimizer_adam_epsilon"]) for _ in range(num_gpus)]
 
@@ -221,10 +223,12 @@ def get_model_fn(train_input_fn, batch_size, flags_obj):
     train_ops = []
     for idx, grad_and_vars in enumerate(grads):
       with tf.name_scope('apply_gradients'), tf.device(tf.DeviceSpec(device_type="GPU", device_index=idx)):
-        update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='tower%d'%idx)
-        with tf.control_dependencies(update_ops):
-          train_ops.append(optimizers[idx].apply_gradients(grad_and_vars, name='apply_grad_{}'.format(idx)))
-    optimize_op = tf.group(*train_ops, name='train_op')
+        global_step = tf.train.get_global_step()
+        update_ops = tf.assign(global_step, global_step+1, name='update_global_step')
+        #update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='tower%d'%idx)
+        #with tf.control_dependencies(update_ops):
+        train_ops.append(optimizers[idx].apply_gradients(grad_and_vars, name='apply_grad_{}'.format(idx)))
+    optimize_op = tf.group(update_ops, *train_ops, name='train_op')
     train_metrics = {"learning_rate": learning_rate}
 
     tf.identity(loss_train, "cross_entropy")
@@ -309,6 +313,7 @@ def define_transformer_flags():
       help=flags_core.help_wrap(
           "The Number of training steps to run between evaluations. This is "
           "used if --train_steps is defined."))
+
 
   # BLEU score computation
   flags.DEFINE_string(
@@ -416,7 +421,7 @@ def run_transformer(flags_obj):
     flags_obj: Object containing parsed flag values.
   """
   num_gpus = flags_core.get_num_gpus(flags_obj)
-  print("NUM_GPUS: ", num_gpus)
+  print("NUM_GPUS: ",num_gpus)
 
   # Add flag-defined parameters to params object
   params = PARAMS_MAP[flags_obj.param_set]
@@ -426,7 +431,7 @@ def run_transformer(flags_obj):
     elif flags_obj.param_set == "base":
       params = model_params.BASE_MULTI_GPU_PARAMS
   
-  params["num_gpus"] = num_gpus
+  params["num_gpus"] = flags_obj.num_gpus
   params["data_dir"] = flags_obj.data_dir
   params["model_dir"] = flags_obj.model_dir
   params["num_parallel_calls"] = flags_obj.num_parallel_calls
@@ -456,7 +461,7 @@ def run_transformer(flags_obj):
       allow_soft_placement=True,
       log_device_placement=False,
       intra_op_parallelism_threads=0,
-      gpu_options=tf.GPUOptions(force_gpu_compatible=True))
+      gpu_options=tf.GPUOptions(force_gpu_compatible=True, allow_growth=True))
   sess_config.gpu_options.allocator_type = 'BFC'
   sess_config.gpu_options.per_process_gpu_memory_fraction = 0.90
   print("SESS_CONFIG: ", sess_config)

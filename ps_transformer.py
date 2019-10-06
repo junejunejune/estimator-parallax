@@ -113,6 +113,7 @@ class _ReplicaDeviceChooser(object):
       ps_device.merge_from(current_device)
 #      print("PS DEVICE: ", ps_device.to_string())
 #      return ps_device.to_string()
+      print("sparse op: ", op.name)
       return '/job:localhost/replica:0/task:0/device:CPU:0'
     worker_device = pydev.DeviceSpec.from_string(self._worker_device or "")
     worker_device.merge_from(current_device)
@@ -152,8 +153,8 @@ def get_model_fn(cluster, task_index, train_input_fn, batch_size, flags_obj):
   def model_fn(features, labels, mode, params):
     """Defines how to train, evaluate and predict from the transformer model."""  
     cluster_spec = cluster.as_dict()
-    num_gpus=len(cluster_spec["worker"])
-    
+#    num_gpus=len(cluster_spec["worker"])
+    num_gpus=2 
     learning_rate = get_learning_rate(learning_rate=params["learning_rate"], hidden_size=params["hidden_size"], learning_rate_warmup_steps=params["learning_rate_warmup_steps"])
     optimizers = [tf.contrib.opt.LazyAdamOptimizer(learning_rate, beta1=params["optimizer_adam_beta1"], beta2=params["optimizer_adam_beta2"], epsilon=params["optimizer_adam_epsilon"]) for _ in range(num_gpus)]
 
@@ -181,15 +182,15 @@ def get_model_fn(cluster, task_index, train_input_fn, batch_size, flags_obj):
 #    output_train = tf.concat(logits, axis=0)
     output_train = tf.reduce_mean(logits, axis=0)
     loss_train = tf.reduce_mean(losses, name='loss')
-    
+   
+    '''
     grads = []
     all_vars= []
     for tower in grad_list:
       grads.append([x[0] for x in tower])
       all_vars.append([x[1] for x in tower])
-    
+
     reduced_grad = []
-    from tensorflow.python.ops import nccl_ops
     if num_gpus==1:
       reduced_grad = grads
     else:
@@ -203,9 +204,10 @@ def get_model_fn(cluster, task_index, train_input_fn, batch_size, flags_obj):
           grads_for_devices.append(g)
         new_all_grads.append(grads_for_devices)
       reduced_grad = list(zip(*new_all_grads))
-    
     grads = [list(zip(gs, vs)) for gs, vs in zip(reduced_grad, all_vars)]
-
+    '''
+    from tensorflow.python.distribute import cross_device_utils
+    grads = cross_device_utils.aggregate_gradients_using_nccl(grad_list)
     #apply gradients to each GPU by broadcasting summed gradient
     train_ops = []
     for idx, grad_and_vars in enumerate(grads):
@@ -448,7 +450,8 @@ def run_transformer(flags_obj):
         allow_soft_placement=True,
         log_device_placement=False,
         intra_op_parallelism_threads=0,
-        gpu_options=tf.GPUOptions(force_gpu_compatible=True, per_process_gpu_memory_fraction=0.333))
+        gpu_options=tf.GPUOptions(allow_growth=True, per_process_gpu_memory_fraction=True))
+#        gpu_options=tf.GPUOptions(force_gpu_compatible=True, per_process_gpu_memory_fraction=0.333))
 #    sess_config.gpu_options.allocator_type = 'BFC'
 #    sess_config.gpu_options.per_process_gpu_memory_fraction = 0.90
     

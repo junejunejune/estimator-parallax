@@ -23,7 +23,7 @@ BASE_PARAMS = defaultdict(
     # Input params
     default_batch_size=2048,  # Maximum number of tokens per batch of examples.
     default_batch_size_tpu=32768,
-    max_length=256,  # Maximum number of tokens per example.
+    max_length=3,  # Maximum number of tokens per example.
 
     # Model params
     initializer_gain=1.0,  # Used in trainable variable initialization.
