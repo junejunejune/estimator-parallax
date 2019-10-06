@@ -2,11 +2,12 @@
 
 
 # Export variables
+```
 PARAM_SET=big
 DATA_DIR=$HOME/transformer/data
 MODEL_DIR=$HOME/transformer/model_$PARAM_SET
 VOCAB_FILE=$DATA_DIR/vocab.ende.32768
-
+```
 # 데이터 다운로드
 ```
 python data_download.py --data_dir=$DATA_DIR
@@ -15,10 +16,17 @@ python data_download.py --data_dir=$DATA_DIR
 
 # 실행 커멘드 
 (model_dir는 체크 포인트를 불러오는 곳으로, 트레이닝 할때는 아무 곳이나 지정하면 됩니다.)
+- elsa-11: 147.46.15.23
+- elsa-12: 147.46.15.21
+- ps
 ```
-python transformer_main.py --data_dir=$DATA_DIR --model_dir=$HOME/transformer/newww \
-  --vocab_file=$VOCAB_FILE --param_set=$PARAM_SET \
-  --bleu_source=$DATA_DIR/newstest2014.en --bleu_ref=$DATA_DIR/newstest2014.de --num_gpus=2 --steps_between_evals=2 --train_steps=4 --batch_size=4096
+python ps_transformer.py --data_dir=$DATA_DIR --model_dir=$HOME/transformer/save \
+   --vocab_file=$VOCAB_FILE --param_set=$PARAM_SET  --batch_size=2048 --job_name=ps --task_index=0 --ps_hosts=147.46.15.23:12345 --worker_hosts=147.46.15.23:23456
+```
+- worker
+```
+python ps_transformer.py --data_dir=$DATA_DIR --model_dir=$HOME/transformer/save \
+   --vocab_file=$VOCAB_FILE --param_set=$PARAM_SET  --batch_size=2048 --job_name=worker --task_index=0 --ps_hosts=147.46.15.23:12345 --worker_hosts=147.46.15.23:23456
 ```
 ----------------------------------------------------------------------------------------------------------------------------
 # Transformer Translation Model
