@@ -16,17 +16,10 @@ python data_download.py --data_dir=$DATA_DIR
 
 # 실행 커멘드 
 (model_dir는 체크 포인트를 불러오는 곳으로, 트레이닝 할때는 아무 곳이나 지정하면 됩니다.)
-- elsa-11: 147.46.15.23
-- elsa-12: 147.46.15.21
-- ps
+
 ```
-python ps_transformer.py --data_dir=$DATA_DIR --model_dir=$HOME/transformer/save \
-   --vocab_file=$VOCAB_FILE --param_set=$PARAM_SET  --batch_size=2048 --job_name=ps --task_index=0 --ps_hosts=147.46.15.23:12345 --worker_hosts=147.46.15.23:23456
-```
-- worker
-```
-python ps_transformer.py --data_dir=$DATA_DIR --model_dir=$HOME/transformer/save \
-   --vocab_file=$VOCAB_FILE --param_set=$PARAM_SET  --batch_size=2048 --job_name=worker --task_index=0 --ps_hosts=147.46.15.23:12345 --worker_hosts=147.46.15.23:23456
+python transformer_main.py --data_dir=$DATA_DIR --model_dir=$HOME/transformer/save \
+   --vocab_file=$VOCAB_FILE --param_set=$PARAM_SET  --batch_size=2046 --num_gpus=6
 ```
 ----------------------------------------------------------------------------------------------------------------------------
 # Transformer Translation Model
