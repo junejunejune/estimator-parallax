@@ -208,11 +208,11 @@ def get_model_fn(train_input_fn, batch_size, flags_obj):
       dn_var = []
       for x in tower:
         if isinstance(x[1], ops.IndexedSlices):
-          sp_grad.extend(x[0])
-          sp_var.extend(x[1])
+          sp_grad.append(x[0])
+          sp_var.append(x[1])
         else:
-          dn_grad.extend(x[0])
-          dn_var.extend(x[1])
+          dn_grad.append(x[0])
+          dn_var.append(x[1])
       
       if(len(sp_var) > 0):
         sparse_grads.append(sp_grad)
@@ -222,12 +222,31 @@ def get_model_fn(train_input_fn, batch_size, flags_obj):
         dense_vars.append(dn_var)
     
     #SPARSE
-    for var, grad in zip(sparse_vars, sparse_grads):
-      if len(grad) == 1:
-        avg_grad = grad[0]
+#    for var, grad in zip(sparse_vars, sparse_grads):
+#      if len(grad) == 1:
+#        avg_grad = grad
+#      else:
+#        avg_grad = tf.multiply(tf.add_n(grad), 1. /len(grad))
+#      gradvars.append((avg_grad, var))
+    if len(sparse_vars)>0:
+      if num_gpus ==1:
+        reduced_grad = sparse_grads
       else:
-        avg_grad = tf.multiply(tf.add_n(grad), 1. /len(grad))
-      gradvars.append((avg_grad, var))
+        new_all_grads = []
+        for grad in sparse_grads:
+          new_grads = []
+          for tower_grad in grad:
+            new_grads.append(tower_grad)
+          summed = tf.add_n(new_grads)
+          grads_for_devices = []
+          for g in summed:
+            with tf.device(g.device):
+              g = tf.multiply(g, 1.0 / num_gpus, name='allreduce_avg')
+            grads_for_devices.append(g)
+          new_all_grads.append(grads_for_devices)
+        reduced_grad = list(zip(*new_all_grads))
+      gradvars = [list(zip(gs, vs)) for gs, vs in zip(reduced_grad, sparse_vars)]
+
 
     #DENSE
     reduced_grad = []
@@ -259,7 +278,7 @@ def get_model_fn(train_input_fn, batch_size, flags_obj):
         train_ops.append(optimizers[idx].apply_gradients(grad_and_vars, name='apply_grad_{}'.format(idx)))
         
         #SPARSE
-        if device_index==0:
+        if device_index==0 and len(sparse_vars) >0:
           learning_rate = get_learning_rate(learning_rate=params["learning_rate"], hidden_size=params["hidden_size"], learning_rate_warmup_steps=params["learning_rate_warmup_steps"])
           optimizer = tf.contrib.opt.LazyAdamOptimizer(learning_rate, beta1=params["optimizer_adam_beta1"], beta2=params["optimizer_adam_beta2"], epsilon=params["optimizer_adam_epsilon"])
           optimizer = tf.train.SyncReplicasOptimizer(optimizer, replicas_to_aggregate=num_devices)
