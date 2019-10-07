@@ -195,19 +195,48 @@ def get_model_fn(train_input_fn, batch_size, flags_obj):
     output_train = tf.reduce_mean(logits, axis=0)
     loss_train = tf.reduce_mean(losses, name='loss')
     
-    grads = []
-    all_vars= []
+#    grads = []
+#    all_vars= []   
+    sparse_grads = []
+    sparse_vars= []
+    dense_grads = []
+    dense_vars = []
     for tower in grad_list:
-      grads.append([x[0] for x in tower])
-      all_vars.append([x[1] for x in tower])
+      sp_grad = []
+      sp_var = []
+      dn_grad = []
+      dn_var = []
+      for x in tower:
+        if isinstance(x[1], ops.IndexedSlices):
+          sp_grad.extend(x[0])
+          sp_var.extend(x[1])
+        else:
+          dn_grad.extend(x[0])
+          dn_var.extend(x[1])
+      
+      if(len(sp_var) > 0):
+        sparse_grads.append(sp_grad)
+        sparse_vars.append(sp_var)
+      if(len(dn_var) > 0):
+        dense_grads.append(dn_grad)
+        dense_vars.append(dn_var)
     
+    #SPARSE
+    for var, grad in zip(sparse_vars, sparse_grads):
+      if len(grad) == 1:
+        avg_grad = grad[0]
+      else:
+        avg_grad = tf.multiply(tf.add_n(grad), 1. /len(grad))
+      gradvars.append((avg_grad, var))
+
+    #DENSE
     reduced_grad = []
     from tensorflow.python.ops import nccl_ops
     if num_gpus==1:
-      reduced_grad = grads
+      reduced_grad = dense_grads
     else:
       new_all_grads = []
-      for grad in zip(*grads):
+      for grad in dense_grads:
         summed = nccl_ops.all_sum(grad)
         grads_for_devices = []
         for g in summed:
@@ -217,7 +246,7 @@ def get_model_fn(train_input_fn, batch_size, flags_obj):
         new_all_grads.append(grads_for_devices)
       reduced_grad = list(zip(*new_all_grads))
     
-    grads = [list(zip(gs, vs)) for gs, vs in zip(reduced_grad, all_vars)]
+    grads = [list(zip(gs, vs)) for gs, vs in zip(reduced_grad, dense_vars)]
 
     #apply gradients to each GPU by broadcasting summed gradient
     train_ops = []
@@ -228,6 +257,17 @@ def get_model_fn(train_input_fn, batch_size, flags_obj):
         #update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope='tower%d'%idx)
         #with tf.control_dependencies(update_ops):
         train_ops.append(optimizers[idx].apply_gradients(grad_and_vars, name='apply_grad_{}'.format(idx)))
+        
+        #SPARSE
+        if device_index==0:
+          learning_rate = get_learning_rate(learning_rate=params["learning_rate"], hidden_size=params["hidden_size"], learning_rate_warmup_steps=params["learning_rate_warmup_steps"])
+          optimizer = tf.contrib.opt.LazyAdamOptimizer(learning_rate, beta1=params["optimizer_adam_beta1"], beta2=params["optimizer_adam_beta2"], epsilon=params["optimizer_adam_epsilon"])
+          optimizer = tf.train.SyncReplicasOptimizer(optimizer, replicas_to_aggregate=num_devices)
+          sync_hook = optimizer.make_session_run_hook(is_chief)
+
+          minimize_op = optimizer.apply_gradients(gradvars, global_step=tf.train.get_global_step())
+          train_ops.append(minimize_op)
+ 
     optimize_op = tf.group(update_ops, *train_ops, name='train_op')
     train_metrics = {"learning_rate": learning_rate}
 
